@@ -1,5 +1,7 @@
 import numpy as np
 
+# Hein: this code is really overcommented and not layed out super nicely
+
 def bin_epochs(data,edges,split_data=False,return_idx=False):
     """
     Bin data into epochs defined by edges. Edges can be a list of jagged arrays (i.e. each array has different length) or a 1D or 2D numpy array.
@@ -115,6 +117,8 @@ def bin_monotonic(data,edges,split_data=False,return_idx=False):
         del binned,mask
         return bin_counts
 
+
+# Hein: why would bins overlap? Trying to think of the sorting that would make this necessary?
 def bin_overlap(data,edges,split_data=True,return_idx=False):
     """
     Bin timing data with overlapping edges. Slower than bin_monotonic.
