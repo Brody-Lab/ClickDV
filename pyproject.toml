@@ -36,6 +36,7 @@ dependencies = [
     "jupyter>=1.1.1",
     "ipykernel>=6.29.5",
     "glmnet-py>=0.1.0b2",
+    "tables>=3.8.0",
 ]
 
 [project.optional-dependencies]
