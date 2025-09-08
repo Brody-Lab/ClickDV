@@ -39,16 +39,9 @@ end
 cells = source_data.Cells;
 fprintf('Found Cells array with dimensions: [%s]\n', num2str(size(cells)));
 
-% Extract neural and session data
-fprintf('\n=== Extracting Neural Data ===\n');
-[neural_data, session_data] = extract_neural_data(cells);
-
-% Extract trial data
-fprintf('\n=== Extracting Trial Data ===\n');
-trial_data = extract_trial_data(cells);
-
-% Combine all extracted data
-extracted_data = merge_structures(neural_data, session_data, trial_data);
+% Extract and concatenate raw data across all probes
+fprintf('\n=== Extracting and Concatenating Raw Data ===\n');
+extracted_data = extract_and_concatenate_raw_data(cells);
 
 % Display summary
 display_extraction_summary(extracted_data);
@@ -62,30 +55,18 @@ end
 
 end
 
-function [neural_data, session_data] = extract_neural_data(cells)
-% Extract spike times, regions, hemispheres, and quality metrics from Cells structure
+function extracted_data = extract_and_concatenate_raw_data(cells)
+% Extract and concatenate all raw fields across probes without processing
 
-neural_data = struct();
-session_data = struct();
+extracted_data = struct();
 
-% Initialize collections - raw data
+% Initialize concatenation arrays
 all_spike_times = {};
 all_hemispheres = {};
 all_regions = {};
-all_electrodes = {};
-
-% Initialize collections - quality metrics
-all_quality_metrics = struct();
-all_quality_metrics.spatial_spread_um = [];
-all_quality_metrics.peak_width_ms = [];
-all_quality_metrics.peak_trough_width_ms = [];
-all_quality_metrics.upward_going = [];
-all_quality_metrics.uvpp = [];
-
-% Initialize collections - filtered data
-filt_spike_times = {};
-filt_hemispheres = {};
-filt_regions = {};
+all_raw_quality_metrics = {};
+all_coordinates = [];
+all_other_unit_fields = containers.Map();
 
 % Process each probe
 num_probes = size(cells, 2);
@@ -94,23 +75,18 @@ fprintf('Processing %d probes...\n', num_probes);
 for probe_idx = 1:num_probes
     fprintf('  Probe %d: ', probe_idx);
     
-    % Use array indexing instead of cell indexing
     cell_data = cells(1, probe_idx);
-    
-    % Debug: check what we got
-    fprintf('type=%s, ', class(cell_data));
     
     if isempty(cell_data)
         fprintf('empty\n');
         continue;
     end
     
-    % Navigate to the cell structure - handle different possible structures
+    % Navigate to the cell structure
     try
         if iscell(cell_data) && ~isempty(cell_data)
             cell_struct = cell_data{1,1};
         else
-            % Try direct array access
             cell_struct = cell_data(1,1);
         end
     catch
@@ -118,130 +94,113 @@ for probe_idx = 1:num_probes
         continue;
     end
     
-    % Count units with spike data
+    % Count units and concatenate spike times
     n_units = 0;
     if isfield(cell_struct, 'raw_spike_time_s')
         spike_times = cell_struct.raw_spike_time_s;
-        
-        % Count non-empty spike time arrays
         for i = 1:numel(spike_times)
             if ~isempty(spike_times{i})
                 n_units = n_units + 1;
-                all_spike_times{end+1} = spike_times{i}(:); % Ensure column vector
+                all_spike_times{end+1} = spike_times{i}(:);
             end
         end
     end
     
-    fprintf('%d units with spikes\n', n_units);
+    fprintf('%d units\n', n_units);
     
-    % Extract hemisphere and region data
-    hemisphere_str = '';
-    if isfield(cell_struct, 'hemisphere')
-        hemisphere_obj = cell_struct.hemisphere;
-        hemisphere_str = extract_mcos_string(hemisphere_obj, 'hemisphere');
-    end
+    % Concatenate metadata fields for each unit
+    unit_level_fields = {'hemisphere', 'region', 'electrode', 'quality_metrics', ...
+                        'waveform', 'distance_from_tip', 'included_units', ...
+                        'frac_spikes_removed'};
     
-    region_str = '';
-    if isfield(cell_struct, 'region')
-        region_obj = cell_struct.region;
-        region_str = extract_mcos_string(region_obj, 'region');
-    end
-    
-    % Extract quality metrics for this probe
-    probe_quality = extract_quality_metrics(cell_struct);
-    
-    % Process each unit - just extract data without filtering
-    unit_idx = 0;
-    if isfield(cell_struct, 'raw_spike_time_s')
-        spike_times = cell_struct.raw_spike_time_s;
-        
-        for i = 1:numel(spike_times)
-            if ~isempty(spike_times{i})
-                unit_idx = unit_idx + 1;
-                
-                % Add to raw collections
-                all_hemispheres{end+1} = hemisphere_str;
-                all_regions{end+1} = region_str;
-                all_electrodes{end+1} = [];
-                
-                % Add quality metrics for this specific unit
-                if ~isempty(probe_quality) && unit_idx <= length(probe_quality.spatial_spread_um)
-                    all_quality_metrics.spatial_spread_um(end+1) = probe_quality.spatial_spread_um(unit_idx);
-                    all_quality_metrics.peak_width_ms(end+1) = probe_quality.peak_width_ms(unit_idx);
-                    all_quality_metrics.peak_trough_width_ms(end+1) = probe_quality.peak_trough_width_ms(unit_idx);
-                    all_quality_metrics.upward_going(end+1) = probe_quality.upward_going(unit_idx);
-                    all_quality_metrics.uvpp(end+1) = probe_quality.uvpp(unit_idx);
-                else
-                    % No quality metrics available - fill with NaN/default values
-                    all_quality_metrics.spatial_spread_um(end+1) = NaN;
-                    all_quality_metrics.peak_width_ms(end+1) = NaN;
-                    all_quality_metrics.peak_trough_width_ms(end+1) = NaN;
-                    all_quality_metrics.upward_going(end+1) = false;
-                    all_quality_metrics.uvpp(end+1) = NaN;
+    for field_name = unit_level_fields
+        field = field_name{1};
+        if isfield(cell_struct, field)
+            field_data = cell_struct.(field);
+            
+            % Store raw field data (replicated for each unit if needed)
+            if strcmp(field, 'hemisphere') || strcmp(field, 'region')
+                % String fields - extract and replicate
+                str_val = extract_mcos_string(field_data, field);
+                for u = 1:n_units
+                    if strcmp(field, 'hemisphere')
+                        all_hemispheres{end+1} = str_val;
+                    elseif strcmp(field, 'region')
+                        all_regions{end+1} = str_val;
+                    end
                 end
+            else
+                % Store raw data for Python processing
+                if ~all_other_unit_fields.isKey(field)
+                    all_other_unit_fields(field) = {};
+                end
+                unit_data = all_other_unit_fields(field);
+                unit_data{end+1} = field_data; % Store probe-level data
+                all_other_unit_fields(field) = unit_data;
             end
         end
     end
+    
+    % Store coordinates (probe-level)
+    probe_coords = struct();
+    coord_fields = {'AP', 'ML', 'DV'};
+    for coord_field = coord_fields
+        field = coord_field{1};
+        if isfield(cell_struct, field)
+            probe_coords.(field) = cell_struct.(field);
+        end
+    end
+    all_coordinates = [all_coordinates; probe_coords];
     
     % Extract session metadata from first probe only
     if probe_idx == 1
-        session_fields = {'nTrials', 'removed_trials', 'sessid', 'sess_date', 'rat'};
+        session_fields = {'nTrials', 'removed_trials', 'sessid', 'sess_date', 'rat', ...
+                         'bank', 'penetration', 'rec', 'shank', 'probe_serial'};
         
-        for field_idx = 1:length(session_fields)
-            field_name = session_fields{field_idx};
-            if isfield(cell_struct, field_name)
-                field_data = cell_struct.(field_name);
+        for field_name = session_fields
+            field = field_name{1};
+            if isfield(cell_struct, field)
+                field_data = cell_struct.(field);
                 
-                % Handle string fields (potentially MCOS)
-                if ismember(field_name, {'sess_date', 'rat'})
-                    session_data.(field_name) = extract_mcos_string(field_data, field_name);
+                % Handle string fields
+                if ismember(field, {'sess_date', 'rat', 'probe_serial'})
+                    extracted_data.(field) = extract_mcos_string(field_data, field);
                 else
-                    session_data.(field_name) = field_data;
+                    extracted_data.(field) = field_data;
                 end
+            end
+        end
+        
+        % Extract trial data from first probe
+        if isfield(cell_struct, 'Trials')
+            trials = cell_struct.Trials;
+            if ~isempty(trials)
+                fprintf('  Extracting trial data...\n');
+                extracted_data = extract_raw_trial_data(trials, extracted_data);
             end
         end
     end
 end
 
-% Format neural data arrays
+% Format concatenated neural data
 if ~isempty(all_spike_times)
-    % Raw data (unfiltered)
-    neural_data.raw_spike_time_s = all_spike_times';
-    neural_data.hemisphere = all_hemispheres;
-    neural_data.region = all_regions';
-    neural_data.electrode = []; % Empty as in source
+    extracted_data.raw_spike_time_s = all_spike_times';
+    extracted_data.hemisphere = all_hemispheres;
+    extracted_data.region = all_regions';
+    extracted_data.electrode = []; % Empty placeholder
     
-    % Quality metrics for all neurons
-    if ~isempty(all_quality_metrics.spatial_spread_um)
-        neural_data.quality_spatial_spread_um = all_quality_metrics.spatial_spread_um';
-        neural_data.quality_peak_width_ms = all_quality_metrics.peak_width_ms';
-        neural_data.quality_peak_trough_width_ms = all_quality_metrics.peak_trough_width_ms';
-        neural_data.quality_upward_going = all_quality_metrics.upward_going';
-        neural_data.quality_uvpp = all_quality_metrics.uvpp';
-        
-        fprintf('  Total neurons: %d (with quality metrics)\n', length(all_spike_times));
-        
-        % Add quality metrics summary  
-        valid_spatial = ~isnan(all_quality_metrics.spatial_spread_um);
-        valid_uvpp = ~isnan(all_quality_metrics.uvpp);
-        
-        if any(valid_spatial)
-            fprintf('  Quality metrics summary:\n');
-            fprintf('    Spatial spread: %.1f±%.1f μm (n=%d)\n', ...
-                   mean(all_quality_metrics.spatial_spread_um(valid_spatial)), ...
-                   std(all_quality_metrics.spatial_spread_um(valid_spatial)), ...
-                   sum(valid_spatial));
-            fprintf('    Peak width: %.2f±%.2f ms\n', mean(all_quality_metrics.peak_width_ms(valid_spatial)), std(all_quality_metrics.peak_width_ms(valid_spatial)));
-            fprintf('    Peak-trough width: %.2f±%.2f ms\n', mean(all_quality_metrics.peak_trough_width_ms(valid_spatial)), std(all_quality_metrics.peak_trough_width_ms(valid_spatial)));
-            fprintf('    uVpp: %.1f±%.1f μV\n', mean(all_quality_metrics.uvpp(valid_uvpp)), std(all_quality_metrics.uvpp(valid_uvpp)));
-            fprintf('    Upward-going: %d/%d (%.1f%%)\n', sum(all_quality_metrics.upward_going), length(all_quality_metrics.upward_going), 100*mean(all_quality_metrics.upward_going));
-        end
-    else
-        fprintf('  Total neurons: %d (no quality metrics extracted)\n', length(all_spike_times));
+    % Store other raw unit-level data for Python processing
+    unit_field_keys = keys(all_other_unit_fields);
+    for i = 1:length(unit_field_keys)
+        field = unit_field_keys{i};
+        extracted_data.(field) = all_other_unit_fields(field);
     end
-else
-    fprintf('  No neural data found!\n');
+    
+    fprintf('  Total concatenated neurons: %d\n', length(all_spike_times));
 end
+
+% Store probe coordinates
+extracted_data.probe_coordinates = all_coordinates;
 
 end
 

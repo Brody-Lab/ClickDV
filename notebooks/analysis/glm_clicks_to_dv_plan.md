@@ -3,19 +3,21 @@
 ## Overview
 Build a GLM to predict decision variables DV(t) from click input data for the first 240 trials of session A324_2023-07-27, using Gaussian basis functions to represent click history and the python glmnet package with Lasso (L1) regularization.
 
+## Key Concept: glmnet's Built-in Cross-Validation
+**glmnet doesn't need manual train/test splitting!** The `cvglmnet` function:
+- Automatically performs k-fold cross-validation internally
+- Selects optimal regularization (lambda) via CV
+- Returns a model trained on ALL provided data
+- Provides CV performance metrics for evaluation
+
 ## Step-by-Step Plan
 
-### 1. Create New Analysis Notebook
-- Create `notebooks/analysis/glm_clicks_to_dv_glmnet.ipynb`
-- Import required libraries including glmnet
+### 1. ✅ Create New Analysis Notebook [COMPLETED]
+- Notebook already created at `notebooks/analysis/glm_clicks_to_dv_glmnet.ipynb`
 
-### 2. Load and Prepare Data (First 240 Trials)
-- Load the H5 file using the `load_session_data()` function from v003 notebook
-- Extract trial_df, click_df, and dv_df DataFrames
-- Filter to first 240 trials:
-  - `trial_df_240 = trial_df[trial_df['trial_id'] < 240]`
-  - `click_df_240 = click_df[click_df['trial_id'] < 240]`
-  - `dv_df_240 = dv_df[dv_df['trial_id'] < 240]`
+### 2. ✅ Load and Prepare Data [COMPLETED]
+- Data loading function implemented using pd.HDFStore
+- Filter to first 240 trials implemented
 
 ### 3. Design Gaussian Basis Functions
 Create a set of Gaussian kernels to capture click history at different timescales:
@@ -39,32 +41,29 @@ def gaussian_basis(t, center, width):
 ### 4. Convolve Clicks with Basis Functions
 For each trial and time point, create feature vectors:
 ```python
-def create_click_features(click_times, eval_time, centers, widths):
+def create_click_features(left_clicks, right_clicks, eval_time, centers, widths):
     """
     Create feature vector by convolving click history with Gaussian basis
     
     Returns:
-    - features_left: (n_basis,) array of left click convolutions
-    - features_right: (n_basis,) array of right click convolutions
+    - features: (2*n_basis,) array - first n_basis for left, next n_basis for right
     """
-    features_left = np.zeros(n_basis)
-    features_right = np.zeros(n_basis)
+    n_basis = len(centers)
+    features = np.zeros(2 * n_basis)
     
-    # Get all clicks before eval_time
-    past_clicks_left = click_times_left[click_times_left < eval_time]
-    past_clicks_right = click_times_right[click_times_right < eval_time]
-    
-    # For each basis function
-    for i, (center, width) in enumerate(zip(centers, widths)):
-        # Time lags from eval_time
-        lags_left = eval_time - past_clicks_left
-        lags_right = eval_time - past_clicks_right
+    # Process left and right clicks
+    for side_idx, clicks in enumerate([left_clicks, right_clicks]):
+        # Get clicks before eval_time
+        past_clicks = clicks[clicks < eval_time]
         
-        # Sum of Gaussian responses
-        features_left[i] = np.sum(gaussian_basis(lags_left, center, width))
-        features_right[i] = np.sum(gaussian_basis(lags_right, center, width))
+        # For each basis function
+        for i, (center, width) in enumerate(zip(centers, widths)):
+            # Time lags from eval_time
+            lags = eval_time - past_clicks
+            # Sum of Gaussian responses
+            features[side_idx * n_basis + i] = np.sum(gaussian_basis(lags, center, width))
     
-    return features_left, features_right
+    return features
 ```
 
 ### 5. Build Feature Matrix X
@@ -94,12 +93,9 @@ for trial_id in range(240):
         eval_time = dv_row['time_bin']
         
         # Create Gaussian basis features
-        feat_left, feat_right = create_click_features(
+        features = create_click_features(
             left_clicks, right_clicks, eval_time, centers, widths
         )
-        
-        # Combine features
-        features = np.concatenate([feat_left, feat_right])
         X.append(features)
         y.append(dv_row['decision_variable'])
         valid_mask.append(dv_row['is_valid'])
@@ -113,168 +109,222 @@ X_valid = X[valid_mask]
 y_valid = y[valid_mask]
 ```
 
-### 6. Manual Train/Test Split
-```python
-# Simple train/test split without sklearn
-np.random.seed(42)
-n_samples = len(X_valid)
-n_train = int(0.8 * n_samples)
-
-# Random shuffle indices
-indices = np.random.permutation(n_samples)
-train_idx = indices[:n_train]
-test_idx = indices[n_train:]
-
-# Split data
-X_train = X_valid[train_idx]
-y_train = y_valid[train_idx]
-X_test = X_valid[test_idx]
-y_test = y_valid[test_idx]
-
-print(f"Training set: {X_train.shape}")
-print(f"Test set: {X_test.shape}")
-```
-
-### 7. Implement GLM with glmnet (Lasso)
+### 6. Implement GLM with glmnet's Built-in Cross-Validation
+**NO MANUAL TRAIN/TEST SPLIT NEEDED!** glmnet handles this internally:
 ```python
 from glmnet_python import cvglmnet, glmnetPredict
 
-# Use cvglmnet for built-in cross-validation on training data
+# cvglmnet performs k-fold CV automatically on ALL your data
+# No need to split beforehand - it does this internally!
 fit = cvglmnet(
-    x=X_train, 
-    y=y_train,
+    x=X_valid,  # ALL your valid data - cvglmnet splits it internally
+    y=y_valid,  # ALL your valid labels
     family='gaussian',  # For continuous DV prediction
     alpha=1.0,  # Pure Lasso (L1 penalty)
-    nfolds=10,  # 10-fold cross-validation
-    standardize=True,  # Standardize features
+    nfolds=10,  # Automatically creates 10 folds internally
+    standardize=True,  # glmnet standardizes features automatically
     intr=True  # Include intercept
 )
 
+# What cvglmnet did internally:
+# 1. Split X_valid into 10 folds
+# 2. For each lambda value:
+#    - Train on 9 folds, test on 1 fold
+#    - Rotate through all 10 folds
+#    - Average the performance
+# 3. Select best lambda based on CV performance
+# 4. Retrain final model on ALL data with best lambda
+
 # The fit object contains:
-# - lambda sequence (fit['lambdau'])
-# - CV mean squared errors (fit['cvm'])
-# - Optimal lambda values:
-#   - fit['lambda_min']: lambda with minimum CV error
-#   - fit['lambda_1se']: largest lambda within 1 SE of minimum
+# - fit['lambdau']: Full lambda sequence tested
+# - fit['cvm']: Cross-validated MSE for each lambda
+# - fit['cvsd']: Standard error of CV MSE
+# - fit['lambda_min']: Lambda with minimum CV error
+# - fit['lambda_1se']: Conservative lambda (1 SE rule)
+# - fit['glmnet_fit']: Final model trained on ALL data
 
 print(f"Optimal lambda (min CV error): {fit['lambda_min']:.6f}")
 print(f"Conservative lambda (1SE rule): {fit['lambda_1se']:.6f}")
+print(f"CV MSE at optimal lambda: {fit['cvm'][fit['lambda_min_idx']]:.4f}")
 
 # Extract coefficients at optimal lambda
-best_lambda = fit['lambda_min']
-coef_indices = np.where(fit['lambdau'] == best_lambda)[0][0]
-best_coefs = fit['glmnet_fit']['beta'][:, coef_indices]
+best_lambda_idx = np.where(fit['lambdau'] == fit['lambda_min'])[0][0]
+best_coefs = fit['glmnet_fit']['beta'][:, best_lambda_idx]
 
-# Count non-zero coefficients (selected features)
+# Count non-zero coefficients (automatic feature selection by Lasso)
 n_selected = np.sum(best_coefs != 0)
 print(f"Selected {n_selected}/{len(best_coefs)} features")
 ```
 
-### 8. Model Evaluation
+### 7. Model Evaluation Using CV Results
 ```python
-# Predict on test set
-y_pred_test = glmnetPredict(
+# The CV performance is already computed by glmnet!
+best_idx = np.where(fit['lambdau'] == fit['lambda_min'])[0][0]
+cv_mse = fit['cvm'][best_idx]
+cv_std = fit['cvsd'][best_idx]
+print(f"Cross-validated MSE: {cv_mse:.4f} ± {cv_std:.4f}")
+print(f"Cross-validated RMSE: {np.sqrt(cv_mse):.4f}")
+
+# Optional: For additional validation, create a holdout set
+# This is ONLY if you want extra confidence beyond CV results
+if False:  # Set to True if you want holdout validation
+    # Create holdout split BEFORE running cvglmnet
+    np.random.seed(42)
+    n_total = len(X_valid)
+    n_model = int(0.8 * n_total)
+    indices = np.random.permutation(n_total)
+    
+    X_model = X_valid[indices[:n_model]]
+    y_model = y_valid[indices[:n_model]]
+    X_holdout = X_valid[indices[n_model:]]
+    y_holdout = y_valid[indices[n_model:]]
+    
+    # Run cvglmnet on model set only
+    fit_holdout = cvglmnet(x=X_model, y=y_model, family='gaussian', 
+                           alpha=1.0, nfolds=10, standardize=True, intr=True)
+    
+    # Evaluate on holdout
+    y_pred_holdout = glmnetPredict(
+        fit_holdout['glmnet_fit'], 
+        newx=X_holdout, 
+        s=fit_holdout['lambda_min']
+    ).flatten()
+    
+    holdout_mse = np.mean((y_holdout - y_pred_holdout)**2)
+    print(f"Holdout MSE: {holdout_mse:.4f}")
+
+# Make predictions on all data to visualize fit quality
+y_pred_all = glmnetPredict(
     fit['glmnet_fit'], 
-    newx=X_test, 
+    newx=X_valid, 
     s=fit['lambda_min']
 ).flatten()
 
-# Calculate metrics without sklearn
+# Calculate R² using glmnet's CV approach
+# Note: glmnet uses deviance ratio which is similar to R²
+# For Gaussian family, deviance ratio ≈ R²
 def calculate_r2(y_true, y_pred):
     ss_res = np.sum((y_true - y_pred)**2)
     ss_tot = np.sum((y_true - np.mean(y_true))**2)
     return 1 - (ss_res / ss_tot)
 
-# Performance metrics
-r2 = calculate_r2(y_test, y_pred_test)
-mse = np.mean((y_test - y_pred_test)**2)
-rmse = np.sqrt(mse)
-corr = np.corrcoef(y_test, y_pred_test)[0, 1]
-
-print(f"Test R²: {r2:.3f}")
-print(f"Test RMSE: {rmse:.3f}")
-print(f"Test Correlation: {corr:.3f}")
-
-# Also evaluate on training set to check for overfitting
-y_pred_train = glmnetPredict(
-    fit['glmnet_fit'], 
-    newx=X_train, 
-    s=fit['lambda_min']
-).flatten()
-
-train_r2 = calculate_r2(y_train, y_pred_train)
-print(f"Train R²: {train_r2:.3f}")
+r2_apparent = calculate_r2(y_valid, y_pred_all)
+print(f"Apparent R² (on all data): {r2_apparent:.3f}")
+print(f"Note: This is optimistic. Use CV MSE for unbiased estimate.")
 ```
 
-### 9. Visualizations
-- **Basis functions**: Plot the Gaussian kernels
-- **Cross-validation curve**: 
-  ```python
-  plt.errorbar(np.log(fit['lambdau']), fit['cvm'], yerr=fit['cvsd'])
-  plt.axvline(np.log(fit['lambda_min']), color='r', linestyle='--', label='λ_min')
-  plt.axvline(np.log(fit['lambda_1se']), color='g', linestyle='--', label='λ_1se')
-  plt.xlabel('log(Lambda)')
-  plt.ylabel('Mean-Squared Error')
-  plt.legend()
-  ```
-- **Lasso path**: Coefficient trajectories from `fit['glmnet_fit']['beta']`
-- **Learned temporal filters**: 
-  ```python
-  # Reshape coefficients to visualize temporal structure
-  left_coefs = best_coefs[:n_basis]
-  right_coefs = best_coefs[n_basis:2*n_basis]
-  
-  plt.figure(figsize=(10, 4))
-  plt.subplot(1, 2, 1)
-  plt.stem(centers, left_coefs)
-  plt.xlabel('Time lag (s)')
-  plt.ylabel('Weight')
-  plt.title('Left click filter')
-  
-  plt.subplot(1, 2, 2)  
-  plt.stem(centers, right_coefs)
-  plt.xlabel('Time lag (s)')
-  plt.ylabel('Weight')
-  plt.title('Right click filter')
-  ```
-- **Prediction quality**: Actual vs predicted DVs scatter plot
+### 8. Visualizations
+```python
+# 1. Cross-validation curve (glmnet already computed this!)
+plt.figure(figsize=(8, 5))
+plt.errorbar(np.log(fit['lambdau']), fit['cvm'], yerr=fit['cvsd'], 
+             alpha=0.7, label='CV MSE ± 1 std')
+plt.axvline(np.log(fit['lambda_min']), color='r', linestyle='--', label='λ_min')
+plt.axvline(np.log(fit['lambda_1se']), color='g', linestyle='--', label='λ_1se')
+plt.xlabel('log(Lambda)')
+plt.ylabel('Mean-Squared Error')
+plt.title('Cross-Validation Curve (Computed by glmnet)')
+plt.legend()
+plt.grid(True, alpha=0.3)
 
-### 10. Sensitivity Analysis
-- Compare lambda_min vs lambda_1se (more regularized)
-- Vary number of basis functions (10, 20, 30)
-- Try different basis function widths
-- Compare linear vs log-spaced centers
+# 2. Regularization path (glmnet computed full path automatically)
+plt.figure(figsize=(10, 6))
+for i in range(fit['glmnet_fit']['beta'].shape[0]):
+    plt.plot(np.log(fit['lambdau']), fit['glmnet_fit']['beta'][i, :], alpha=0.5)
+plt.axvline(np.log(fit['lambda_min']), color='r', linestyle='--', label='λ_min')
+plt.xlabel('log(Lambda)')
+plt.ylabel('Coefficient Value')
+plt.title('Lasso Path - Feature Selection by glmnet')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+# 3. Learned temporal filters
+left_coefs = best_coefs[:n_basis]
+right_coefs = best_coefs[n_basis:2*n_basis]
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+ax1.stem(centers, left_coefs)
+ax1.set_xlabel('Time lag (s)')
+ax1.set_ylabel('Weight')
+ax1.set_title('Left Click Filter (Selected by Lasso)')
+ax1.grid(True, alpha=0.3)
+
+ax2.stem(centers, right_coefs)
+ax2.set_xlabel('Time lag (s)')
+ax2.set_ylabel('Weight')
+ax2.set_title('Right Click Filter (Selected by Lasso)')
+ax2.grid(True, alpha=0.3)
+plt.tight_layout()
+
+# 4. Model fit quality
+plt.figure(figsize=(8, 8))
+plt.scatter(y_valid, y_pred_all, alpha=0.3, s=1)
+plt.plot([y_valid.min(), y_valid.max()], [y_valid.min(), y_valid.max()], 
+         'r--', label='Perfect prediction')
+plt.xlabel('Actual DV')
+plt.ylabel('Predicted DV')
+plt.title(f'Model Fit (Apparent R² = {r2_apparent:.3f})')
+plt.legend()
+plt.grid(True, alpha=0.3)
+```
+
+### 9. Optional: Alternative Regularization with glmnet
+```python
+# glmnet makes it easy to compare different regularization approaches!
+
+# 1. Compare Lasso vs Ridge vs Elastic Net
+alphas = [1.0, 0.5, 0.0]  # Lasso, Elastic Net, Ridge
+alpha_names = ['Lasso (α=1)', 'Elastic Net (α=0.5)', 'Ridge (α=0)']
+
+for alpha, name in zip(alphas, alpha_names):
+    fit_alpha = cvglmnet(x=X_valid, y=y_valid, family='gaussian', 
+                         alpha=alpha, nfolds=10, standardize=True, intr=True)
+    print(f"{name}: CV MSE = {fit_alpha['cvm'][np.where(fit_alpha['lambdau'] == fit_alpha['lambda_min'])[0][0]]:.4f}")
+
+# 2. Use lambda_1se for more regularization (built into glmnet!)
+conservative_coefs = fit['glmnet_fit']['beta'][:, np.where(fit['lambdau'] == fit['lambda_1se'])[0][0]]
+n_selected_conservative = np.sum(conservative_coefs != 0)
+print(f"Conservative model: {n_selected_conservative} features (vs {n_selected} with lambda_min)")
+```
 
 ## Key Implementation Details
 
-### No sklearn dependency:
-- Manual train/test split with numpy
-- Custom R² calculation
-- All metrics computed with numpy only
+### Understanding glmnet's Built-in Features:
 
-### glmnet handles:
-- Cross-validation internally
-- Lambda sequence generation
-- Standardization
-- Regularization path computation
-
-### Why Pure Lasso (alpha=1.0)?
-- Produces sparse solutions (many exact zeros)
-- Automatic feature selection
-- More interpretable than ridge or elastic net
-- Identifies most relevant time lags for click integration
-
-### Advantages of Built-in CV:
-- Automatic lambda sequence generation
-- Proper CV fold management
+#### Automatic Cross-Validation (`cvglmnet`):
+- **No manual train/test split needed** - cvglmnet handles k-fold CV internally
+- Automatically generates lambda sequence
+- Provides CV performance metrics (cvm, cvsd)
 - Returns both lambda_min and lambda_1se
-- Includes standard errors for model selection
+- Final model is trained on ALL data with optimal lambda
 
-## Expected Outputs
-1. Sparse GLM model with selected temporal features
-2. Cross-validation curve showing optimal regularization
-3. Identification of critical time lags for click integration
-4. Quantitative performance metrics (R², MSE, correlation)
-5. Clear visualization of temporal filters for left/right clicks
+#### Feature Standardization:
+- glmnet automatically standardizes when `standardize=True`
+- Coefficients are returned on original scale
+- No need to manually standardize features
 
-This approach minimizes external dependencies, using mainly numpy and glmnet's built-in functionality.
+#### Regularization Path:
+- glmnet computes entire regularization path efficiently
+- Stores all coefficients for all lambda values
+- Enables easy comparison of different regularization levels
+
+#### Feature Selection:
+- Lasso (alpha=1.0) automatically selects features by setting coefficients to exactly zero
+- Number of selected features depends on lambda value
+- lambda_1se provides more aggressive feature selection than lambda_min
+
+### Why Use glmnet's Built-in CV Instead of Manual Splitting?
+1. **Efficiency**: Uses warm starts across lambda values
+2. **Consistency**: Ensures same folds used for all lambdas
+3. **Automatic**: Handles fold creation, rotation, and averaging
+4. **Complete**: Provides standard errors for model selection
+5. **Best Practice**: Final model uses all available data
+
+### Expected Outputs
+1. Sparse GLM model with automatically selected temporal features
+2. Cross-validation curve from glmnet's internal CV
+3. Identification of critical time lags via Lasso feature selection
+4. CV-based performance metrics (unbiased estimates)
+5. Clear visualization of learned temporal filters
+
+This approach leverages glmnet's sophisticated built-in functionality rather than reimplementing standard ML practices.
